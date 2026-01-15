@@ -88,13 +88,22 @@ class CustomAuthenticationBar extends Component {
     // Add parameters to login URL
     if (!isLoggedIn && buttonUrl) {
       const separator = buttonUrl.includes('?') ? '&' : '?';
-      buttonUrl = `${buttonUrl}${separator}target=${encodeURIComponent('/assets/image')}`;
+      buttonUrl = `${buttonUrl}${separator}target=${encodeURIComponent('/viewer')}&app=viewer`;
       if (canvasThumbnailId) {
         buttonUrl = `${buttonUrl}&path=${encodeURIComponent(canvasThumbnailId)}`;
       }
+      
+      // Extract URN from canvas ID
+      if (canvas && canvas.__jsonld && canvas.__jsonld.id) {
+        const canvasId = canvas.__jsonld.id;
+        // Extract URN portion (everything between the protocol and :MANIFEST:)
+        const urnMatch = canvasId.match(/[:/](URN-[^:]+:[^:]+:[^:]+):/);
+        if (urnMatch && urnMatch[1]) {
+          const urn = urnMatch[1];
+          buttonUrl = `${buttonUrl}&urn=${encodeURIComponent(urn)}`;
+        }
+      }
     }
-    
-    console.log('Button label:', buttonLabel, 'Button URL:', buttonUrl);
     
     return (
       <Paper
