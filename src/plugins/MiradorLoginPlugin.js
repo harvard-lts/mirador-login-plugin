@@ -5,18 +5,6 @@ import { requestInfoResponse } from 'mirador/dist/es/src/state/actions/infoRespo
 import MiradorCanvas from 'mirador/dist/es/src/lib/MiradorCanvas';
 
 /**
- * Check if a specific cookie exists
- */
-const hasCookie = (cookieName) => {
-  const cookies = document.cookie.split(';');
-  const found = cookies.some((cookie) => {
-    return cookie.trim().startsWith(cookieName + '=');
-  });
-  console.log(`[hasCookie] Looking for "${cookieName}", found:`, found);
-  return found;
-};
-
-/**
  * Login Monitor Component
  * Monitors authentication state changes (login/logout) and refreshes canvas images
  * This component runs in the background and renders no UI
@@ -28,11 +16,7 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, requestInfoRespo
     hasRequestInfoResponse: typeof requestInfoResponse === 'function'
   });
   
-  const previousLoginStateRef = useRef(null);
-  const logoutTimeoutRef = useRef(null);
-  const intervalRef = useRef(null);
-  
-  // Store latest props in refs so the interval can access current values
+  // Store latest props in refs so event handlers can access current values
   const propsRef = useRef({ visibleCanvasesByWindow, infoResponses, requestInfoResponse });
   
   // Update refs when props change
