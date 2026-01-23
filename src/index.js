@@ -1,9 +1,9 @@
-import miradorReplaceLoginPlugin from './plugins/MiradorReplaceLoginPlugin';
+import miradorLoginPlugin from './plugins/MiradorLoginPlugin';
 
 export {
-  miradorReplaceLoginPlugin,
+  miradorLoginPlugin,
 };
 
 export default [
-  miradorReplaceLoginPlugin,
+  miradorLoginPlugin,
 ];
