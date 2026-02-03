@@ -12,6 +12,8 @@ import MiradorCanvas from 'mirador/dist/es/src/lib/MiradorCanvas';
 const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, requestInfoResponse }) => {
   // Store latest props in refs so event handlers can access current values
   const propsRef = useRef({ visibleCanvasesByWindow, infoResponses, requestInfoResponse });
+  const activePopupRef = useRef(null);
+  const lastRefreshTimeRef = useRef(0);
   
   // Update refs when props change
   useEffect(() => {
@@ -25,6 +27,14 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, requestInfoRespo
      * This re-fetches info.json with new authentication credentials
      */
     const refreshCanvases = () => {
+      // Debounce: prevent multiple refreshes within 2 seconds
+      const now = Date.now();
+      if (now - lastRefreshTimeRef.current < 2000) {
+        // Skipping duplicate refresh (too soon after last refresh)
+        return;
+      }
+      lastRefreshTimeRef.current = now;
+      
       const { visibleCanvasesByWindow, requestInfoResponse } = propsRef.current;
       if (!visibleCanvasesByWindow || Object.keys(visibleCanvasesByWindow).length === 0) {
         // No windows found, skipping refresh
@@ -74,11 +84,67 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, requestInfoRespo
       }
     };
     
-    // Add postMessage listener
-    window.addEventListener('message', handleAuthMessage);    
+    /**
+     * Handle window focus event to detect when user returns from auth popup
+     */
+    const handleWindowFocus = () => {
+      // Only process if we have an active popup reference
+      if (activePopupRef.current) {
+        // Main window regained focus, checking if popup closed
+        
+        // Small delay to ensure popup state is updated
+        setTimeout(() => {
+          try {
+            // Verify popup is actually closed
+            if (activePopupRef.current.closed) {
+              // Auth popup confirmed closed, refreshing canvases
+              activePopupRef.current = null;
+              
+              // Refresh canvases after popup closes
+              setTimeout(() => {
+                refreshCanvases();
+              }, 500);
+            }
+          } catch (error) {
+            // If we can't access the popup, assume it's closed
+            // Cannot access popup (likely closed or cross-origin)
+            activePopupRef.current = null;
+            
+            setTimeout(() => {
+              refreshCanvases();
+            }, 500);
+          }
+        }, 100);
+      }
+    };
+    
+    /**
+     * Intercept window.open to detect when auth popup opens
+     */
+    const originalWindowOpen = window.open;
+    window.open = function(...args) {
+      const popup = originalWindowOpen.apply(this, args);
+      
+      // Check if this looks like an auth popup (by URL pattern)
+      const url = args[0];
+      if (popup && url && (url.includes('login') || url.includes('auth'))) {
+        // Auth popup detected
+        activePopupRef.current = popup;
+      }
+      
+      return popup;
+    };
+    
+    // Add event listeners
+    window.addEventListener('message', handleAuthMessage);
+    window.addEventListener('focus', handleWindowFocus);    
+    
     // Cleanup
     return () => {
       window.removeEventListener('message', handleAuthMessage);
+      window.removeEventListener('focus', handleWindowFocus);
+      // Restore original window.open
+      window.open = originalWindowOpen;
     };
   }, []); // Empty dependency array - only run once on mount
 
