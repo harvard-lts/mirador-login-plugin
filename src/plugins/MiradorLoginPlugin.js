@@ -151,6 +151,51 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
         return;
       }
 
+      // Force OpenSeadragon to clear its tile cache
+      try {
+        // Find all OpenSeadragon viewer instances
+        const osdElements = document.querySelectorAll('[data-openseadragon-viewer]');
+        osdElements.forEach(element => {
+          // Try to access the viewer instance
+          if (element.viewer) {
+            const viewer = element.viewer;
+            
+            // Get current viewport state
+            const bounds = viewer.viewport.getBounds();
+            const zoom = viewer.viewport.getZoom();
+            
+            // Clear the tile cache by removing all items and re-adding them
+            const items = [];
+            for (let i = 0; i < viewer.world.getItemCount(); i++) {
+              const item = viewer.world.getItemAt(i);
+              items.push({
+                tileSource: item.source,
+                index: i
+              });
+            }
+            
+            // Remove all items (clears tile cache)
+            viewer.world.removeAll();
+            
+            // Re-add items with fresh tile sources
+            setTimeout(() => {
+              items.forEach(itemData => {
+                viewer.addTiledImage({
+                  tileSource: itemData.tileSource,
+                  index: itemData.index,
+                  success: function() {
+                    // Restore viewport
+                    viewer.viewport.fitBounds(bounds, true);
+                  }
+                });
+              });
+            }, 100);
+          }
+        });
+      } catch (error) {
+        console.error('[LoginMonitor] Error clearing OpenSeadragon cache:', error);
+      }
+
       let totalInfoResponsesRequested = 0;
 
       // Iterate through all windows and their visible canvases
