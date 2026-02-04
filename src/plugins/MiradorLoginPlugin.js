@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { getWindowIds } from 'mirador/dist/es/src/state/selectors/getters';
 import { getVisibleCanvases, selectInfoResponses } from 'mirador/dist/es/src/state/selectors/canvases';
-import { requestInfoResponse } from 'mirador/dist/es/src/state/actions/infoResponse';
+import { requestInfoResponse, removeInfoResponse } from 'mirador/dist/es/src/state/actions/infoResponse';
 import { addAuthenticationRequest, receiveAccessToken } from 'mirador/dist/es/src/state/actions/auth';
 import { setCanvas } from 'mirador/dist/es/src/state/actions/canvas';
 import MiradorCanvas from 'mirador/dist/es/src/lib/MiradorCanvas';
@@ -11,17 +11,17 @@ import MiradorCanvas from 'mirador/dist/es/src/lib/MiradorCanvas';
  * Monitors authentication state changes (login/logout) and refreshes canvas images
  * This component runs in the background and renders no UI
  */
-const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas }) => {
+const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, removeInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas }) => {
   // Store latest props in refs so event handlers can access current values
-  const propsRef = useRef({ visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas });
+  const propsRef = useRef({ visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, removeInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas });
   const activePopupRef = useRef(null);
   const lastRefreshTimeRef = useRef(0);
   const hasCheckedInitialAuth = useRef(false);
   
   // Update refs when props change
   useEffect(() => {
-    propsRef.current = { visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas };
-  }, [visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas]);
+    propsRef.current = { visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, removeInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas };
+  }, [visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, removeInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas]);
   
   // Check for existing auth on mount - trigger refresh when canvases become available
   useEffect(() => {
@@ -30,7 +30,7 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
       
       // Delay to ensure Mirador has finished processing initial info.json
       setTimeout(() => {
-        const { visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas } = propsRef.current;
+        const { visibleCanvasesByWindow, infoResponses, state, requestInfoResponse, removeInfoResponse, addAuthenticationRequest, receiveAccessToken, setCanvas } = propsRef.current;
         
         let refreshCount = 0;
         Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {
@@ -146,57 +146,10 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
       }
       lastRefreshTimeRef.current = now;
       
-      const { visibleCanvasesByWindow, requestInfoResponse } = propsRef.current;
+      const { visibleCanvasesByWindow, requestInfoResponse, removeInfoResponse } = propsRef.current;
       if (!visibleCanvasesByWindow || Object.keys(visibleCanvasesByWindow).length === 0) {
         return;
       }
-
-      // Force OpenSeadragon to clear its tile cache
-      try {
-        // Find all OpenSeadragon viewer instances
-        const osdElements = document.querySelectorAll('[data-openseadragon-viewer]');
-        osdElements.forEach(element => {
-          // Try to access the viewer instance
-          if (element.viewer) {
-            const viewer = element.viewer;
-            
-            // Get current viewport state
-            const bounds = viewer.viewport.getBounds();
-            const zoom = viewer.viewport.getZoom();
-            
-            // Clear the tile cache by removing all items and re-adding them
-            const items = [];
-            for (let i = 0; i < viewer.world.getItemCount(); i++) {
-              const item = viewer.world.getItemAt(i);
-              items.push({
-                tileSource: item.source,
-                index: i
-              });
-            }
-            
-            // Remove all items (clears tile cache)
-            viewer.world.removeAll();
-            
-            // Re-add items with fresh tile sources
-            setTimeout(() => {
-              items.forEach(itemData => {
-                viewer.addTiledImage({
-                  tileSource: itemData.tileSource,
-                  index: itemData.index,
-                  success: function() {
-                    // Restore viewport
-                    viewer.viewport.fitBounds(bounds, true);
-                  }
-                });
-              });
-            }, 100);
-          }
-        });
-      } catch (error) {
-        console.error('[LoginMonitor] Error clearing OpenSeadragon cache:', error);
-      }
-
-      let totalInfoResponsesRequested = 0;
 
       // Iterate through all windows and their visible canvases
       Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {        
@@ -206,11 +159,10 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
             const miradorCanvas = new MiradorCanvas(canvas);
             const imageServiceIds = miradorCanvas.imageServiceIds;
             
-            // Request info response for each service
+            // First remove cached info responses, then request fresh ones
             imageServiceIds.forEach((serviceId) => {
               if (serviceId) {
-                requestInfoResponse(serviceId);
-                totalInfoResponsesRequested++;
+                removeInfoResponse(serviceId);
               }
             });
           } catch (error) {
@@ -218,6 +170,26 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
           }
         });
       });
+      
+      // Request new info responses after brief delay to ensure removal is processed
+      setTimeout(() => {
+        Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {        
+          canvases.forEach((canvas, index) => {
+            try {
+              const miradorCanvas = new MiradorCanvas(canvas);
+              const imageServiceIds = miradorCanvas.imageServiceIds;
+              
+              imageServiceIds.forEach((serviceId) => {
+                if (serviceId) {
+                  requestInfoResponse(serviceId);
+                }
+              });
+            } catch (error) {
+              console.error(`[LoginMonitor] Error requesting info ${index + 1}:`, error);
+            }
+          });
+        });
+      }, 100);
     };
     
     /**
@@ -412,6 +384,7 @@ const mapStateToProps = (state) => {
  */
 const mapDispatchToProps = {
   requestInfoResponse,
+  removeInfoResponse,
   addAuthenticationRequest,
   receiveAccessToken,
   setCanvas,
