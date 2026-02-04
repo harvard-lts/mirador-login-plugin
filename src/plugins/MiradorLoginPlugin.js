@@ -146,49 +146,66 @@ const LoginMonitor = ({ visibleCanvasesByWindow, infoResponses, state, requestIn
       }
       lastRefreshTimeRef.current = now;
       
-      const { visibleCanvasesByWindow, requestInfoResponse, removeInfoResponse } = propsRef.current;
+      const { visibleCanvasesByWindow, state, requestInfoResponse, removeInfoResponse, setCanvas } = propsRef.current;
       if (!visibleCanvasesByWindow || Object.keys(visibleCanvasesByWindow).length === 0) {
         return;
       }
 
-      // Iterate through all windows and their visible canvases
+      // Step 1: Remove cached info responses
       Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {        
-        // Extract image service IDs from each canvas
         canvases.forEach((canvas, index) => {
           try {
             const miradorCanvas = new MiradorCanvas(canvas);
             const imageServiceIds = miradorCanvas.imageServiceIds;
             
-            // First remove cached info responses, then request fresh ones
             imageServiceIds.forEach((serviceId) => {
               if (serviceId) {
                 removeInfoResponse(serviceId);
               }
             });
           } catch (error) {
-            console.error(`[LoginMonitor] Error processing canvas ${index + 1}:`, error);
+            console.error(`[LoginMonitor] Error removing info response ${index + 1}:`, error);
           }
         });
       });
       
-      // Request new info responses after brief delay to ensure removal is processed
+      // Step 2: Reset canvases to force OpenSeadragon to unmount/remount
+      const windowIds = getWindowIds(state);
+      const canvasStates = {};
+      
+      windowIds.forEach(windowId => {
+        const windowState = state.windows[windowId];
+        if (windowState && windowState.canvasId) {
+          canvasStates[windowId] = windowState.canvasId;
+          setCanvas(windowId, null);
+        }
+      });
+      
+      // Step 3: Restore canvases and request fresh info.json
       setTimeout(() => {
-        Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {        
-          canvases.forEach((canvas, index) => {
-            try {
-              const miradorCanvas = new MiradorCanvas(canvas);
-              const imageServiceIds = miradorCanvas.imageServiceIds;
-              
-              imageServiceIds.forEach((serviceId) => {
-                if (serviceId) {
-                  requestInfoResponse(serviceId);
-                }
-              });
-            } catch (error) {
-              console.error(`[LoginMonitor] Error requesting info ${index + 1}:`, error);
-            }
-          });
+        Object.entries(canvasStates).forEach(([windowId, canvasId]) => {
+          setCanvas(windowId, canvasId);
         });
+        
+        // Request fresh info responses
+        setTimeout(() => {
+          Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {        
+            canvases.forEach((canvas, index) => {
+              try {
+                const miradorCanvas = new MiradorCanvas(canvas);
+                const imageServiceIds = miradorCanvas.imageServiceIds;
+                
+                imageServiceIds.forEach((serviceId) => {
+                  if (serviceId) {
+                    requestInfoResponse(serviceId);
+                  }
+                });
+              } catch (error) {
+                console.error(`[LoginMonitor] Error requesting info ${index + 1}:`, error);
+              }
+            });
+          });
+        }, 100);
       }, 100);
     };
     
