@@ -1,6 +1,6 @@
 {
   "name": "@harvard-lts/mirador-login-plugin",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Replacement login plugin for Mirador 3",
   "module": "dist/es/index.js",
   "files": [
