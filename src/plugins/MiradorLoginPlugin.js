@@ -1,8 +1,11 @@
-import React, { useEffect, useRef } from 'react';
-import { getWindowIds } from 'mirador/dist/es/src/state/selectors/getters';
-import { getVisibleCanvases, selectInfoResponses } from 'mirador/dist/es/src/state/selectors/canvases';
-import { requestInfoResponse } from 'mirador/dist/es/src/state/actions/infoResponse';
-import MiradorCanvas from 'mirador/dist/es/src/lib/MiradorCanvas';
+import { useEffect, useRef } from 'react';
+import {
+  getWindowIds,
+  getVisibleCanvases,
+  selectInfoResponses,
+  requestInfoResponse,
+  MiradorCanvas,
+} from 'mirador';
 
 /**
  * Login Monitor Component
