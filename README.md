@@ -4,7 +4,42 @@
 
 <a href="https://github.com/harvard-lts/mirador-login-plugin/actions/workflows/coverage-node.yml"><img src="https://github.com/harvard-lts/mirador-login-plugin/raw/badges/test-coverage/coverage.svg"></a>
 
-A Mirador 4 plugin that monitors authentication state changes and refreshes canvas images on login/logout.
+A Mirador 4 plugin that repairs the visible canvas image after a login that Mirador core failed to refresh on its own.
+
+## What it does, and why it is not a blanket refresh
+
+Stock Mirador refreshes images after auth from exactly one trigger —
+`takeEvery(RECEIVE_ACCESS_TOKEN, refetchInfoResponses)` — and that refetch only
+re-requests info responses advertising a token service whose id matches the token
+action. Two gaps follow, both observed live against HarvardKey:
+
+- **A login round-trip that never produces a token action refreshes nothing.**
+  Core takes `openWindow = window.open` and never watches the handle, so it has
+  no popup-close detection at all. Symptom: the *first* login of a session does
+  not refresh, while later ones do.
+- **When more than one auth service is in play** (e.g. an interactive login
+  service plus an IIIF Auth `external` block), core's token-service-scoped filter
+  can miss the visible image. Symptom: the auth/logout bar updates but the image
+  stays degraded.
+
+An earlier version of this plugin (`< 2.1.0`) papered over these by refreshing on
+every auth `postMessage`, which duplicated core's own refetch and fired a second,
+redundant request on every healthy login. That double-refresh is why it was
+removed from the viewer builds.
+
+`2.1.0` replaces that with **verify-then-repair**:
+
+1. Notice a login completed — an access token succeeded, *or* the auth popup closed.
+2. Snapshot the info response currently held for each visible image service.
+3. Wait `REPAIR_GRACE_MS` (1.5s) for core to act.
+4. Re-request **only** the services whose info response core left untouched
+   (identity comparison — every info-response action replaces the entry, so an
+   unchanged reference proves core ignored it).
+
+On a healthy login every entry has changed by step 4, so this plugin dispatches
+nothing and core's single request stands. It cannot double-refresh by
+construction, and the extra 1.5s applies only to the repair path that previously
+never recovered at all.
 
 ## Compatibility
 
