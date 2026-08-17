@@ -27,19 +27,29 @@ every auth `postMessage`, which duplicated core's own refetch and fired a second
 redundant request on every healthy login. That double-refresh is why it was
 removed from the viewer builds.
 
-`2.1.0` replaces that with **verify-then-repair**:
+`2.1.x` replaces that with **verify-then-repair**:
 
 1. Notice a login completed — an access token succeeded, *or* the auth popup closed.
-2. Snapshot the info response currently held for each visible image service.
+2. Note which visible image services hold a **degraded** info response. This is
+   core's own flag: the `infoResponses` reducer stores `degraded: true` for
+   `RECEIVE_DEGRADED_INFO_RESPONSE` (the 401 path, i.e. low-res tiles) and
+   `degraded: false` for a normal 200. If nothing is degraded there is nothing to
+   fix, so stop here without arming anything.
 3. Wait `REPAIR_GRACE_MS` (1.5s) for core to act.
-4. Re-request **only** the services whose info response core left untouched
-   (identity comparison — every info-response action replaces the entry, so an
-   unchanged reference proves core ignored it).
+4. Re-request **only** the services that are *both* still degraded *and*
+   untouched by core (identity comparison — every info-response action replaces
+   the entry, so an unchanged reference proves core ignored it).
 
 On a healthy login every entry has changed by step 4, so this plugin dispatches
 nothing and core's single request stands. It cannot double-refresh by
 construction, and the extra 1.5s applies only to the repair path that previously
 never recovered at all.
+
+> **2.1.0 is broken — use 2.1.1 or later.** 2.1.0 omitted the `degraded` test in
+> steps 2 and 4 and asked only "did core act?". For a user who is *already*
+> signed in, the first info.json fetch returns full resolution, so core correctly
+> does nothing — and 2.1.0 read that silence as failure, reloading a
+> perfectly good image 1.5s after every single page load.
 
 ## Compatibility
 

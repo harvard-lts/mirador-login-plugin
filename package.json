@@ -1,6 +1,6 @@
 {
   "name": "@harvard-lts/mirador-login-plugin",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Repairs the visible canvas image after a login Mirador core failed to refresh",
   "module": "dist/es/index.js",
   "files": [
