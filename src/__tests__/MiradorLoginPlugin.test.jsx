@@ -150,6 +150,12 @@ describe('LoginMonitor component', () => {
   });
 });
 
+// Helper: an info response entry as core's reducer stores it. `degraded: true`
+// is the 401 path (low-res tiles); `false` is a normal authenticated 200.
+const entry = (id, degraded) => ({
+  degraded, id, isFetching: false, json: { id },
+});
+
 describe('LoginMonitor verify-then-repair', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -166,41 +172,34 @@ describe('LoginMonitor verify-then-repair', () => {
 
   const canvases = { w1: [{ id: 'c1' }] };
 
-  // Render logged-out, then flip to logged-in — the access-token trigger.
-  const login = (infoResponses) => {
-    const view = render(
-      <LoginMonitor
-        visibleCanvasesByWindow={canvases}
-        infoResponses={infoResponses}
-        authSucceeded={false}
-        requestInfoResponse={requestInfoResponse}
-      />,
-    );
-    view.rerender(
-      <LoginMonitor
-        visibleCanvasesByWindow={canvases}
-        infoResponses={infoResponses}
-        authSucceeded
-        requestInfoResponse={requestInfoResponse}
-      />,
-    );
-    return view;
-  };
-
-  /** Push a new infoResponses object, as a Redux update would. */
-  const update = (view, infoResponses) => view.rerender(
+  const renderAt = (infoResponses, authSucceeded) => render(
     <LoginMonitor
       visibleCanvasesByWindow={canvases}
       infoResponses={infoResponses}
-      authSucceeded
+      authSucceeded={authSucceeded}
       requestInfoResponse={requestInfoResponse}
     />,
   );
 
-  it('repairs a service core left untouched after a successful login', () => {
-    const stale = { 'svc-a': { id: 'svc-a', json: { degraded: true } } };
+  /** Push a new infoResponses object, as a Redux update would. */
+  const update = (view, infoResponses, authSucceeded = true) => view.rerender(
+    <LoginMonitor
+      visibleCanvasesByWindow={canvases}
+      infoResponses={infoResponses}
+      authSucceeded={authSucceeded}
+      requestInfoResponse={requestInfoResponse}
+    />,
+  );
 
-    login(stale);
+  /** Render logged-out, then flip to logged-in — the access-token trigger. */
+  const login = (infoResponses) => {
+    const view = renderAt(infoResponses, false);
+    update(view, infoResponses);
+    return view;
+  };
+
+  it('repairs a degraded service core left untouched after a successful login', () => {
+    login({ 'svc-a': entry('svc-a', true) });
     expect(requestInfoResponse).not.toHaveBeenCalled(); // still inside grace
 
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
@@ -209,19 +208,39 @@ describe('LoginMonitor verify-then-repair', () => {
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT repair when core already replaced the info response', () => {
-    const before = { 'svc-a': { id: 'svc-a', json: { degraded: true } } };
-    const view = login(before);
+  // The regression that shipped in 2.1.0: an already-signed-in user gets a
+  // full-resolution image on the FIRST fetch, so core has nothing to refetch.
+  // Reading that silence as failure reloaded a perfectly good image 1.5s after
+  // every load.
+  it('does NOT repair when the image was never degraded (already signed in)', () => {
+    login({ 'svc-a': entry('svc-a', false) });
+    vi.advanceTimersByTime(REPAIR_GRACE_MS * 2);
 
-    // Core's own refetchInfoResponses fires: new entry object for svc-a.
-    update(view, { 'svc-a': { id: 'svc-a', json: { full: true } } });
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does NOT repair when core already replaced the degraded response', () => {
+    const view = login({ 'svc-a': entry('svc-a', true) });
+
+    // Core's own refetchInfoResponses fires: new entry, no longer degraded.
+    update(view, { 'svc-a': entry('svc-a', false) });
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does NOT repair while core\'s own refetch is still in flight', () => {
+    const view = login({ 'svc-a': entry('svc-a', true) });
+
+    // REQUEST_INFO_RESPONSE: isFetching, and `degraded` is absent entirely.
+    update(view, { 'svc-a': { id: 'svc-a', isFetching: true } });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
     expect(requestInfoResponse).not.toHaveBeenCalled();
   });
 
   it('does NOT repair when core removed the info response', () => {
-    const view = login({ 'svc-a': { id: 'svc-a' } });
+    const view = login({ 'svc-a': entry('svc-a', true) });
 
     // REMOVE_INFO_RESPONSE — core discarded it for lazy re-fetch.
     update(view, {});
@@ -230,31 +249,37 @@ describe('LoginMonitor verify-then-repair', () => {
     expect(requestInfoResponse).not.toHaveBeenCalled();
   });
 
-  it('repairs only the services core missed', () => {
-    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a', 'svc-b'] }));
-    const sharedStale = { id: 'svc-b', json: { degraded: true } };
-    const view = login({
-      'svc-a': { id: 'svc-a', json: { degraded: true } },
-      'svc-b': sharedStale,
-    });
+  it('does NOT repair a service with no info response at all', () => {
+    login({});
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    // Core refreshed svc-a only; svc-b keeps its original entry object.
-    update(view, { 'svc-a': { id: 'svc-a', json: { full: true } }, 'svc-b': sharedStale });
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('repairs only the degraded services core missed', () => {
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a', 'svc-b'] }));
+    const stillStale = entry('svc-b', true);
+    const view = login({ 'svc-a': entry('svc-a', true), 'svc-b': stillStale });
+
+    // Core refreshed svc-a only; svc-b keeps its original degraded entry.
+    update(view, { 'svc-a': entry('svc-a', false), 'svc-b': stillStale });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
     expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
-  it('requests a service that has no info response at all', () => {
-    login({});
+  it('ignores an undegraded service alongside a degraded one', () => {
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-ok', 'svc-bad'] }));
+    login({ 'svc-ok': entry('svc-ok', false), 'svc-bad': entry('svc-bad', true) });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-bad');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
   it('does not re-arm while authSucceeded stays true', () => {
-    const stale = { 'svc-a': { id: 'svc-a' } };
+    const stale = { 'svc-a': entry('svc-a', true) };
     const view = login(stale);
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
@@ -293,7 +318,7 @@ describe('LoginMonitor verify-then-repair', () => {
   it('skips falsy service ids and de-duplicates repeats', () => {
     MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a', null, '', 'svc-a'] }));
 
-    login({});
+    login({ 'svc-a': entry('svc-a', true) });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
@@ -307,10 +332,11 @@ describe('LoginMonitor verify-then-repair', () => {
       .mockImplementationOnce(() => ({ imageServiceIds: ['svc-ok'] }));
 
     const twoCanvases = { w1: [{ id: 'c1' }, { id: 'c2' }] };
+    const responses = { 'svc-ok': entry('svc-ok', true) };
     const view = render(
       <LoginMonitor
         visibleCanvasesByWindow={twoCanvases}
-        infoResponses={{}}
+        infoResponses={responses}
         authSucceeded={false}
         requestInfoResponse={requestInfoResponse}
       />,
@@ -318,7 +344,7 @@ describe('LoginMonitor verify-then-repair', () => {
     view.rerender(
       <LoginMonitor
         visibleCanvasesByWindow={twoCanvases}
-        infoResponses={{}}
+        infoResponses={responses}
         authSucceeded
         requestInfoResponse={requestInfoResponse}
       />,
@@ -350,10 +376,10 @@ describe('LoginMonitor popup-close trigger', () => {
 
   // authSucceeded stays false throughout: this is the first-login case where no
   // token action ever reaches core, so the popup is the only signal available.
-  const renderMonitor = () => render(
+  const renderMonitor = (degraded = true) => render(
     <LoginMonitor
       visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
-      infoResponses={{ 'svc-a': { id: 'svc-a' } }}
+      infoResponses={{ 'svc-a': entry('svc-a', degraded) }}
       authSucceeded={false}
       requestInfoResponse={requestInfoResponse}
     />,
@@ -379,6 +405,18 @@ describe('LoginMonitor popup-close trigger', () => {
     closeAndFocus(popup);
 
     expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+  });
+
+  it('does not repair after a popup closes if the image is not degraded', () => {
+    const popup = { closed: false };
+    window.open = vi.fn().mockReturnValue(popup);
+
+    renderMonitor(false);
+    window.open('https://example.com/login', '_blank');
+
+    closeAndFocus(popup);
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
   });
 
   it('does not track popups for non-auth urls', () => {
@@ -427,10 +465,11 @@ describe('LoginMonitor popup-close trigger', () => {
     const popup = { closed: false };
     window.open = vi.fn().mockReturnValue(popup);
 
+    const responses = { 'svc-a': entry('svc-a', true) };
     const view = render(
       <LoginMonitor
         visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
-        infoResponses={{ 'svc-a': { id: 'svc-a' } }}
+        infoResponses={responses}
         authSucceeded={false}
         requestInfoResponse={requestInfoResponse}
       />,
@@ -444,7 +483,7 @@ describe('LoginMonitor popup-close trigger', () => {
     view.rerender(
       <LoginMonitor
         visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
-        infoResponses={{ 'svc-a': { id: 'svc-a' } }}
+        infoResponses={responses}
         authSucceeded
         requestInfoResponse={requestInfoResponse}
       />,

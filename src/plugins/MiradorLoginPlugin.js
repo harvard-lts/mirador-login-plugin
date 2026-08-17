@@ -60,12 +60,15 @@ export const visibleImageServiceIds = (visibleCanvasesByWindow) => {
  *   1. Notice a login completed (an access token succeeded, or the auth popup
  *      closed — core has no popup-close detection of its own, which is why the
  *      first login of a HarvardKey session could refresh nothing at all).
- *   2. Snapshot the info response currently held for each visible image service.
+ *   2. Note which visible image services are holding a DEGRADED info response
+ *      (core's own 401 flag) — if none are, there is nothing to fix, so stop.
  *   3. Wait REPAIR_GRACE_MS for core to do its job.
- *   4. Re-request ONLY the services whose info response core left untouched.
+ *   4. Re-request ONLY the services that are both still degraded and untouched
+ *      by core.
  *
- * Because step 4 skips anything core already replaced, the healthy path issues
- * exactly one request — core's — and this plugin issues none.
+ * Because step 2 requires actual evidence of a degraded image and step 4 skips
+ * anything core already replaced, the healthy paths issue exactly one request —
+ * core's, or none at all — and this plugin issues none.
  *
  * Renders no UI.
  */
@@ -95,23 +98,39 @@ const LoginMonitor = ({
   }, []);
 
   /**
-   * Arm a deferred check: snapshot what core is holding now, and after the grace
-   * period repair whichever visible services core never touched.
+   * Arm a deferred check: note which visible services are serving a DEGRADED
+   * info response, and after the grace period repair the ones core left that way.
+   *
+   * `degraded` is core's own flag, set by the infoResponses reducer —
+   * RECEIVE_DEGRADED_INFO_RESPONSE (the 401 path) stores `degraded: true`, a
+   * normal RECEIVE_INFO_RESPONSE stores `degraded: false`. It is the only honest
+   * test of "this image needs re-requesting". Asking merely whether core acted is
+   * not: when the viewer is loaded by an already-signed-in user the very first
+   * fetch returns full resolution, so core correctly does nothing and there is
+   * nothing to repair — reading that silence as failure caused a pointless
+   * reload of a perfectly good image 1.5s after every load.
    */
   const armRepair = useCallback(() => {
-    const ids = visibleImageServiceIds(propsRef.current.visibleCanvasesByWindow);
+    const ids = visibleImageServiceIds(propsRef.current.visibleCanvasesByWindow)
+      .filter((id) => propsRef.current.infoResponses?.[id]?.degraded === true);
     if (ids.length === 0) return;
 
     // Identity, not deep equality: every info-response action (request, receive,
     // degrade, remove) replaces the entry, so a changed reference — or a removed
     // entry — proves core acted on that service.
-    const before = new Map(ids.map((id) => [id, propsRef.current.infoResponses?.[id]]));
+    const before = new Map(ids.map((id) => [id, propsRef.current.infoResponses[id]]));
 
     clearTimeout(repairTimerRef.current);
     repairTimerRef.current = setTimeout(() => {
       const after = propsRef.current.infoResponses;
-      const untouched = ids.filter((id) => before.get(id) === after?.[id]);
-      if (untouched.length > 0) repair(untouched);
+      // Repair only what is BOTH untouched by core and still degraded. The second
+      // clause also means an in-flight core refetch (isFetching, no `degraded`)
+      // or one that landed on a still-degraded response is left alone rather than
+      // piled onto.
+      const stillDegraded = ids.filter(
+        (id) => before.get(id) === after?.[id] && after?.[id]?.degraded === true,
+      );
+      if (stillDegraded.length > 0) repair(stillDegraded);
     }, REPAIR_GRACE_MS);
   }, [repair]);
 
