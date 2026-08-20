@@ -19,6 +19,9 @@ export const REFRESH_DEBOUNCE_MS = 2000;
 // Delay after regaining focus before reading `popup.closed` — the popup's state
 // is not always updated at the instant focus returns.
 export const POPUP_CLOSE_DELAY_MS = 100;
+// The message mps-login's `logout-close` view posts to `window.opener` once the
+// session is deleted and every MPS cookie has been cleared.
+export const LOGOUT_COMPLETE_TYPE = 'mps-logout-complete';
 
 /**
  * Collect the image service id of every visible canvas across every window.
@@ -42,6 +45,19 @@ export const visibleImageServiceIds = (visibleCanvasesByWindow) => {
   });
 
   return [...new Set(ids)];
+};
+
+/**
+ * The origin a popup url will land on, for checking `event.origin` against.
+ * Relative urls resolve against the viewer's own location. Returns null for a
+ * url that cannot be parsed, which the message handler treats as "no match".
+ */
+export const originOf = (url) => {
+  try {
+    return new URL(url, window.location.href).origin;
+  } catch (error) {
+    return null;
+  }
 };
 
 /**
@@ -69,6 +85,10 @@ export const visibleImageServiceIds = (visibleCanvasesByWindow) => {
  * Because step 2 requires actual evidence of a degraded image and step 4 skips
  * anything core already replaced, the healthy paths issue exactly one request —
  * core's, or none at all — and this plugin issues none.
+ *
+ * Logout is the mirror image and needs the opposite treatment. After logout the
+ * cached info responses are full-resolution and MUST be re-requested so they come
+ * back degraded, so there is nothing to verify first — see `refreshAll`.
  *
  * Renders no UI.
  */
@@ -134,6 +154,29 @@ const LoginMonitor = ({
     }, REPAIR_GRACE_MS);
   }, [repair]);
 
+  /**
+   * Re-request EVERY visible image service, with no `degraded` filter — the
+   * logout path.
+   *
+   * The verify-then-repair logic above is useless here: after logout the cached
+   * responses are the full-resolution ones, so `degraded` is false for exactly
+   * the services that need re-requesting. Nor can core be relied on to do it:
+   * `refetchInfoResponsesOnLogout` is scoped to the single `tokenServiceId` that
+   * fired, while MPS advertises two auth services (`external` + `login`), so the
+   * visible image is routinely missed.
+   *
+   * No grace period either. mps-login clears its cookies *before* rendering
+   * `logout-close`, so by the time the message arrives the credentials are
+   * already gone and the refetch correctly 401s into a degraded response —
+   * unlike core's blind 2s delay. Any pending login repair is cancelled: the
+   * session it was arming for no longer exists.
+   */
+  const refreshAll = useCallback(() => {
+    clearTimeout(repairTimerRef.current);
+    const ids = visibleImageServiceIds(propsRef.current.visibleCanvasesByWindow);
+    if (ids.length > 0) repair(ids);
+  }, [repair]);
+
   // Trigger 1: an access token just succeeded. Covers the already-signed-in
   // case, where the silent probe resolves with no popup at all and core's
   // token-service-scoped refetch can miss the visible image entirely.
@@ -142,44 +185,82 @@ const LoginMonitor = ({
     prevAuthSucceededRef.current = authSucceeded;
   }, [authSucceeded, armRepair]);
 
-  // Trigger 2: the auth popup closed. Core never watches the handle it gets back
-  // from window.open, so a round-trip that ends without a token action — the
-  // first HarvardKey login of a session — otherwise refreshes nothing.
+  // Triggers 2 and 3: the auth popup closed, and the logout popup reported back.
+  // Core never watches the handle it gets back from window.open, so a round-trip
+  // that ends without a token action — the first HarvardKey login of a session,
+  // or any logout — otherwise refreshes nothing.
   useEffect(() => {
-    /** Note the popup so the focus handler knows to watch for it closing. */
+    /**
+     * Note the popup, and which kind it was, so the handlers below can branch.
+     * `logout` matches nothing in the login patterns: mps-login's logout popup
+     * is `…/logout/mirador`.
+     */
     const originalWindowOpen = window.open;
     window.open = function trackedOpen(...args) {
       const popup = originalWindowOpen.apply(this, args);
       const url = args[0];
-      if (popup && url && (url.includes('login') || url.includes('auth'))) {
-        activePopupRef.current = popup;
+      if (popup && url) {
+        if (url.includes('logout')) {
+          activePopupRef.current = { popup, kind: 'logout', origin: originOf(url) };
+        } else if (url.includes('login') || url.includes('auth')) {
+          activePopupRef.current = { popup, kind: 'login', origin: originOf(url) };
+        }
       }
       return popup;
     };
 
-    /** User came back to the main window — if the popup has closed, verify. */
+    /**
+     * The logout popup finished: session deleted, cookies cleared. Only accept it
+     * from the origin we opened the logout popup at — never `*`, and never from a
+     * login popup, whose own postMessages are core's business.
+     *
+     * This handshake depends on mps-login sending
+     * `Cross-Origin-Opener-Policy: unsafe-none` on the `logout-close` response;
+     * helmet's default `same-origin` would null out `window.opener` in the popup
+     * (viewer origin ≠ login origin) and take the `popup.closed` fallback below
+     * with it.
+     */
+    const handleMessage = (event) => {
+      if (event.data?.type !== LOGOUT_COMPLETE_TYPE) return;
+      const tracked = activePopupRef.current;
+      if (!tracked || tracked.kind !== 'logout') return;
+      if (!tracked.origin || event.origin !== tracked.origin) return;
+
+      activePopupRef.current = null;
+      refreshAll();
+    };
+
+    /** User came back to the main window — if the popup has closed, act on it. */
     const handleWindowFocus = () => {
       if (!activePopupRef.current) return;
 
       setTimeout(() => {
+        const tracked = activePopupRef.current;
+        if (!tracked) return;
         try {
-          if (!activePopupRef.current.closed) return;
+          if (!tracked.popup.closed) return;
         } catch (error) {
           // Cross-origin popup we can no longer read; treat as closed.
         }
         activePopupRef.current = null;
-        armRepair();
+        // A logout popup that closed without a message — dismissed by hand, or a
+        // postMessage that never arrived. Refresh anyway; the debounce in
+        // `repair` keeps this from doubling up on a message that did arrive.
+        if (tracked.kind === 'logout') refreshAll();
+        else armRepair();
       }, POPUP_CLOSE_DELAY_MS);
     };
 
     window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('message', handleMessage);
 
     return () => {
       window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('message', handleMessage);
       window.open = originalWindowOpen;
       clearTimeout(repairTimerRef.current);
     };
-  }, [armRepair]);
+  }, [armRepair, refreshAll]);
 
   return null;
 };
