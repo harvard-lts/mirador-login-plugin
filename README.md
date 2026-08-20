@@ -4,7 +4,7 @@
 
 <a href="https://github.com/harvard-lts/mirador-login-plugin/actions/workflows/coverage-node.yml"><img src="https://github.com/harvard-lts/mirador-login-plugin/raw/badges/test-coverage/coverage.svg"></a>
 
-A Mirador 4 plugin that repairs the visible canvas image after a login that Mirador core failed to refresh on its own.
+A Mirador 4 plugin that repairs the visible canvas image after a login — or a logout — that Mirador core failed to refresh on its own.
 
 ## What it does, and why it is not a blanket refresh
 
@@ -50,6 +50,37 @@ never recovered at all.
 > signed in, the first info.json fetch returns full resolution, so core correctly
 > does nothing — and 2.1.0 read that silence as failure, reloading a
 > perfectly good image 1.5s after every single page load.
+
+## Logout (2.2.0)
+
+Logout is the mirror image of the above and needs the opposite treatment. After a
+logout the cached info responses are the **full-resolution** ones, so nothing is
+`degraded` and verify-then-repair would correctly refuse to act — yet those are
+exactly the responses that must be re-requested, so they come back degraded.
+Core's `refetchInfoResponsesOnLogout` does not cover it either: it is scoped to
+the single `tokenServiceId` that fired, while MPS advertises two auth services
+(`login` + `external`). Symptom: the auth bar flips back to "Sign in" but the
+image keeps rendering full-resolution tiles until the page is reloaded.
+
+So `2.2.0` adds a second, unfiltered path:
+
+1. The `window.open` interception now also tracks urls containing `logout`, and
+   records which kind of popup it was.
+2. A `message` listener accepts `{ type: 'mps-logout-complete' }` — posted by
+   mps-login's `logout-close` view — but **only** from the origin the logout popup
+   was opened at. Never `*`, never a login popup's own messages.
+3. On a match, every visible image service is re-requested with no `degraded`
+   filter and no grace period: mps-login clears its cookies *before* rendering
+   `logout-close`, so by the time the message arrives the refetch correctly 401s.
+4. If the logout popup closes without a message — dismissed by hand, or a blocked
+   `postMessage` — the focus handler refreshes anyway. The shared
+   `REFRESH_DEBOUNCE_MS` guard keeps that from doubling up.
+
+> The `postMessage` handshake requires the logout response to carry
+> `Cross-Origin-Opener-Policy: unsafe-none`. Helmet's default `same-origin` nulls
+> out `window.opener` in the popup whenever the viewer and login origins differ,
+> which would also break the `popup.closed` fallback. mps-login sets this on the
+> `logout-close` response only.
 
 ## Compatibility
 

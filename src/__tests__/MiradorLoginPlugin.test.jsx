@@ -23,7 +23,9 @@ vi.mock('mirador', () => ({
 
 // Import AFTER vi.mock so the mock is in effect.
 const mod = await import('../plugins/MiradorLoginPlugin.js');
-const { default: plugin, REPAIR_GRACE_MS, REFRESH_DEBOUNCE_MS } = mod;
+const {
+  default: plugin, REPAIR_GRACE_MS, REFRESH_DEBOUNCE_MS, LOGOUT_COMPLETE_TYPE, originOf,
+} = mod;
 const { component: LoginMonitor, mapStateToProps, mapDispatchToProps } = plugin;
 
 describe('plugin descriptor', () => {
@@ -126,27 +128,14 @@ describe('LoginMonitor component', () => {
     );
 
     expect(addSpy).toHaveBeenCalledWith('focus', expect.any(Function));
+    expect(addSpy).toHaveBeenCalledWith('message', expect.any(Function));
     expect(window.open).not.toBe(originalOpen);
 
     unmount();
 
     expect(removeSpy).toHaveBeenCalledWith('focus', expect.any(Function));
+    expect(removeSpy).toHaveBeenCalledWith('message', expect.any(Function));
     expect(window.open).toBe(originalOpen);
-  });
-
-  it('does not listen for auth postMessages (core already handles that path)', () => {
-    const addSpy = vi.spyOn(window, 'addEventListener');
-
-    render(
-      <LoginMonitor
-        visibleCanvasesByWindow={{}}
-        infoResponses={{}}
-        authSucceeded={false}
-        requestInfoResponse={vi.fn()}
-      />,
-    );
-
-    expect(addSpy).not.toHaveBeenCalledWith('message', expect.any(Function));
   });
 });
 
@@ -492,5 +481,234 @@ describe('LoginMonitor popup-close trigger', () => {
     vi.advanceTimersByTime(REPAIR_GRACE_MS * 2);
 
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('originOf', () => {
+  it('reduces a popup url to its bare origin', () => {
+    expect(originOf('https://mps-dev.example.com/logout/mirador?a=1')).toBe('https://mps-dev.example.com');
+  });
+
+  it('resolves a relative url against the viewer location', () => {
+    expect(originOf('/logout/mirador')).toBe(window.location.origin);
+  });
+
+  it('returns null for an unparseable url', () => {
+    expect(originOf('http://')).toBeNull();
+  });
+});
+
+describe('LoginMonitor logout refresh', () => {
+  const LOGIN_HOST = 'https://mps-dev.example.com';
+  const LOGOUT_URL = `${LOGIN_HOST}/logout/mirador`;
+  let originalOpen;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    MiradorCanvas.mockReset();
+    requestInfoResponse.mockReset();
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a', 'svc-b'] }));
+    originalOpen = window.open;
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    window.open = originalOpen;
+  });
+
+  // The post-logout state: the cached info responses are the FULL-RESOLUTION
+  // ones, so nothing is `degraded` and the verify-then-repair path would refuse
+  // to act. Re-requesting them is exactly what makes them degrade again.
+  const renderMonitor = () => render(
+    <LoginMonitor
+      visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+      infoResponses={{ 'svc-a': entry('svc-a', false), 'svc-b': entry('svc-b', false) }}
+      authSucceeded
+      requestInfoResponse={requestInfoResponse}
+    />,
+  );
+
+  const postLogoutComplete = (origin = LOGIN_HOST, data = { type: LOGOUT_COMPLETE_TYPE }) => {
+    window.dispatchEvent(new MessageEvent('message', { data, origin }));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+  };
+
+  const openLogoutPopup = (popup = { closed: false }) => {
+    window.open = vi.fn().mockReturnValue(popup);
+    renderMonitor();
+    window.open(LOGOUT_URL, '_blank');
+    return popup;
+  };
+
+  it('re-requests every visible service — degraded or not — on mps-logout-complete', () => {
+    openLogoutPopup();
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a logout message from a foreign origin', () => {
+    openLogoutPopup();
+
+    postLogoutComplete('https://evil.example.com');
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('ignores a message of the wrong type', () => {
+    openLogoutPopup();
+
+    postLogoutComplete(LOGIN_HOST, { type: 'mps-login-complete' });
+    window.dispatchEvent(new MessageEvent('message', { data: 'plain string', origin: LOGIN_HOST }));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('ignores a logout message when no logout popup is being tracked', () => {
+    renderMonitor();
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('ignores a logout message while only a login popup is tracked', () => {
+    window.open = vi.fn().mockReturnValue({ closed: false });
+    renderMonitor();
+    window.open(`${LOGIN_HOST}/login/mirador`, '_blank');
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('refreshes anyway when the logout popup is closed by hand', () => {
+    const popup = openLogoutPopup();
+
+    popup.closed = true;
+    window.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes once when the message and the popup close both land', () => {
+    const popup = openLogoutPopup();
+
+    postLogoutComplete();
+    popup.closed = true;
+    window.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2); // one per service, once
+  });
+
+  it('debounces a second logout inside the refresh window', () => {
+    openLogoutPopup();
+    postLogoutComplete();
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+
+    // Same popup handle re-opened well inside REFRESH_DEBOUNCE_MS.
+    window.open(LOGOUT_URL, '_blank');
+    postLogoutComplete();
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes again once the debounce window has passed', () => {
+    openLogoutPopup();
+    postLogoutComplete();
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(REFRESH_DEBOUNCE_MS);
+    window.open(LOGOUT_URL, '_blank');
+    postLogoutComplete();
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(4);
+  });
+
+  it('cancels a pending login repair when logout completes', () => {
+    const popup = { closed: false };
+    window.open = vi.fn().mockReturnValue(popup);
+
+    // A degraded image arms the login repair...
+    const responses = { 'svc-a': entry('svc-a', true), 'svc-b': entry('svc-b', true) };
+    const view = render(
+      <LoginMonitor
+        visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+        infoResponses={responses}
+        authSucceeded={false}
+        requestInfoResponse={requestInfoResponse}
+      />,
+    );
+    view.rerender(
+      <LoginMonitor
+        visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+        infoResponses={responses}
+        authSucceeded
+        requestInfoResponse={requestInfoResponse}
+      />,
+    );
+
+    // ...then the user logs out before the grace period elapses.
+    window.open(LOGOUT_URL, '_blank');
+    postLogoutComplete();
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+
+    // The armed repair must not fire a second round for a session that is gone.
+    vi.advanceTimersByTime(REPAIR_GRACE_MS * 2);
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it('tracks nothing when the popup was blocked', () => {
+    window.open = vi.fn().mockReturnValue(null);
+    renderMonitor();
+    window.open(LOGOUT_URL, '_blank');
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  // The message can land in the window between focus firing and the deferred
+  // `popup.closed` read; the message path has already refreshed by then.
+  it('drops the deferred close check when the message wins the race', () => {
+    const popup = openLogoutPopup();
+
+    popup.closed = true;
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: LOGOUT_COMPLETE_TYPE },
+      origin: LOGIN_HOST,
+    }));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it('does nothing when there are no visible canvases to refresh', () => {
+    window.open = vi.fn().mockReturnValue({ closed: false });
+    render(
+      <LoginMonitor
+        visibleCanvasesByWindow={{}}
+        infoResponses={{}}
+        authSucceeded
+        requestInfoResponse={requestInfoResponse}
+      />,
+    );
+    window.open(LOGOUT_URL, '_blank');
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
   });
 });
