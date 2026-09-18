@@ -6,17 +6,34 @@
     <title>Test</title>
     <style>
       body {
-        margin: 0;
+        margin: 20px;
         padding: 0;
       }
-      #mirador {
-        height: 100vh;
-        width: 100vw;
+      code {
+        background: #eee;
+        padding: 0 3px;
       }
     </style>
   </head>
   <body>
-    <div id="mirador"></div>
-    <script type="module" src="./demoEntry.js"></script>
+    <div>
+      <h2>Mirador Login Plugin</h2>
+      <p>Choose which demo to view:</p>
+      <ul>
+        <li>
+          <a href="public.html">Public Demo</a> &mdash; an unrestricted Houghton
+          manifest. No auth services, so the plugin stays idle. Use this for
+          non-auth work.
+        </li>
+        <li>
+          <a href="restricted.html">Restricted Demo</a> &mdash; a local fixture
+          that exercises the IIIF Auth kiosk flow. Needs
+          <code>mps-asset-delivery-images</code> on :23002 and
+          <code>mpsinlib</code> on :23087 running locally; see
+          <code>demo/README.md</code> for the required env and the verification
+          commands.
+        </li>
+      </ul>
+    </div>
   </body>
 </html>
