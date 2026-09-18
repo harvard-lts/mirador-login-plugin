@@ -10,6 +10,7 @@ const getVisibleCanvases = vi.fn();
 const selectInfoResponses = vi.fn();
 const getAccessTokens = vi.fn();
 const requestInfoResponse = vi.fn();
+const getAuth = vi.fn();
 const MiradorCanvas = vi.fn();
 
 vi.mock('mirador', () => ({
@@ -17,6 +18,7 @@ vi.mock('mirador', () => ({
   getVisibleCanvases: (...args) => getVisibleCanvases(...args),
   selectInfoResponses: (...args) => selectInfoResponses(...args),
   getAccessTokens: (...args) => getAccessTokens(...args),
+  getAuth: (...args) => getAuth(...args),
   requestInfoResponse: (...args) => requestInfoResponse(...args),
   MiradorCanvas: function (...args) { return MiradorCanvas(...args); },
 }));
@@ -710,5 +712,205 @@ describe('LoginMonitor logout refresh', () => {
     postLogoutComplete();
 
     expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+});
+
+describe('LoginMonitor blocked-popup handling', () => {
+  let originalOpen;
+
+  beforeEach(() => {
+    MiradorCanvas.mockReset();
+    requestInfoResponse.mockReset();
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a'] }));
+    originalOpen = window.open;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.open = originalOpen;
+  });
+
+  const renderMonitor = () => render(
+    <LoginMonitor
+      visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+      infoResponses={{ 'svc-a': entry('svc-a', true) }}
+      authSucceeded={false}
+      requestInfoResponse={requestInfoResponse}
+    />,
+  );
+
+  /**
+   * A browser that blocks a popup returns `null` from `window.open`. Mirador
+   * core's `NewBrowserWindow` null-checks that in its poll interval but NOT in
+   * its unmount cleanup, which calls `newWindow.close()` unconditionally — so a
+   * bare `null` crashes the whole window into an error boundary, taking the
+   * image and top bar with it (LTSMPS-1048).
+   *
+   * The plugin therefore never hands core a `null`. These tests pin the shape
+   * core depends on: something already-closed, with a callable `close()`.
+   */
+  it('returns an already-closed stub instead of null when a popup is blocked', () => {
+    window.open = vi.fn().mockReturnValue(null);
+
+    renderMonitor();
+
+    const returned = window.open('https://example.com/kiosk?origin=https://x.test');
+
+    expect(returned).not.toBeNull();
+    expect(returned.closed).toBe(true);
+    expect(typeof returned.close).toBe('function');
+  });
+
+  it('returns a stub whose close() is safe to call, as core does on unmount', () => {
+    window.open = vi.fn().mockReturnValue(null);
+
+    renderMonitor();
+
+    const returned = window.open('https://example.com/kiosk');
+
+    // This is the exact call that throws today when core receives `null`.
+    expect(() => returned.close()).not.toThrow();
+  });
+
+  it('still passes a real popup straight through', () => {
+    const popup = { closed: false };
+    window.open = vi.fn().mockReturnValue(popup);
+
+    renderMonitor();
+
+    expect(window.open('https://example.com/login')).toBe(popup);
+  });
+});
+
+describe('LoginMonitor blocked-popup reporting', () => {
+  const KIOSK_ID = 'https://iiif.example.edu/kiosk';
+  let originalOpen;
+
+  beforeEach(() => {
+    MiradorCanvas.mockReset();
+    requestInfoResponse.mockReset();
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a'] }));
+    originalOpen = window.open;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.open = originalOpen;
+  });
+
+  /**
+   * Core builds the popup url as `${authServiceId}?origin=...` and the matching
+   * auth entry is already in state by then, so the entry supplies the windowId
+   * and profile that Retry needs to re-dispatch the request.
+   */
+  const renderMonitor = (popupBlocked, auth) => render(
+    <LoginMonitor
+      visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+      infoResponses={{ 'svc-a': entry('svc-a', true) }}
+      authSucceeded={false}
+      requestInfoResponse={requestInfoResponse}
+      auth={auth}
+      popupBlocked={popupBlocked}
+    />,
+  );
+
+  const authState = {
+    [KIOSK_ID]: {
+      id: KIOSK_ID,
+      isFetching: true,
+      profile: 'http://iiif.io/api/auth/1/kiosk',
+      windowId: 'w1',
+    },
+  };
+
+  it('reports the blocked auth service, window and profile', () => {
+    const popupBlocked = vi.fn();
+    window.open = vi.fn().mockReturnValue(null);
+
+    renderMonitor(popupBlocked, authState);
+    window.open(`${KIOSK_ID}?origin=https://viewer.example.edu`);
+
+    expect(popupBlocked).toHaveBeenCalledWith({
+      authServiceId: KIOSK_ID,
+      profile: 'http://iiif.io/api/auth/1/kiosk',
+      windowId: 'w1',
+    });
+  });
+
+  it('does not report when the popup opened normally', () => {
+    const popupBlocked = vi.fn();
+    window.open = vi.fn().mockReturnValue({ closed: false });
+
+    renderMonitor(popupBlocked, authState);
+    window.open(`${KIOSK_ID}?origin=https://viewer.example.edu`);
+
+    expect(popupBlocked).not.toHaveBeenCalled();
+  });
+
+  // A blocked popup for a url with no matching auth entry gives us no windowId,
+  // so there is no window to show a banner in. Still must not throw.
+  it('stays quiet when no auth entry matches the blocked url', () => {
+    const popupBlocked = vi.fn();
+    window.open = vi.fn().mockReturnValue(null);
+
+    renderMonitor(popupBlocked, authState);
+
+    expect(() => window.open('https://example.com/unrelated')).not.toThrow();
+    expect(popupBlocked).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The real ordering: LoginMonitor mounts with no auth entry, and the kiosk
+   * entry only lands on the commit that also mounts core's NewBrowserWindow.
+   * BackgroundPluginArea renders after Workspace, so core's mount effect (which
+   * calls window.open) runs before any effect of ours — meaning an
+   * effect-updated ref would still be empty here. Regression test for exactly
+   * that: the previous version passed the mount-time test below but reported
+   * nothing in a real browser.
+   */
+  it('reports a block when the auth entry arrives after mount', () => {
+    const popupBlocked = vi.fn();
+    window.open = vi.fn().mockReturnValue(null);
+
+    const { rerender } = render(
+      <LoginMonitor
+        visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+        infoResponses={{ 'svc-a': entry('svc-a', true) }}
+        authSucceeded={false}
+        requestInfoResponse={requestInfoResponse}
+        auth={{}}
+        popupBlocked={popupBlocked}
+      />,
+    );
+
+    rerender(
+      <LoginMonitor
+        visibleCanvasesByWindow={{ w1: [{ id: 'c1' }] }}
+        infoResponses={{ 'svc-a': entry('svc-a', true) }}
+        authSucceeded={false}
+        requestInfoResponse={requestInfoResponse}
+        auth={authState}
+        popupBlocked={popupBlocked}
+      />,
+    );
+
+    window.open(`${KIOSK_ID}?origin=https://viewer.example.edu`);
+
+    expect(popupBlocked).toHaveBeenCalledWith({
+      authServiceId: KIOSK_ID,
+      profile: 'http://iiif.io/api/auth/1/kiosk',
+      windowId: 'w1',
+    });
+  });
+
+  it('still returns the safe stub when it cannot report', () => {
+    window.open = vi.fn().mockReturnValue(null);
+
+    renderMonitor(undefined, undefined);
+
+    const returned = window.open(`${KIOSK_ID}?origin=https://viewer.example.edu`);
+
+    expect(returned.closed).toBe(true);
+    expect(() => returned.close()).not.toThrow();
   });
 });

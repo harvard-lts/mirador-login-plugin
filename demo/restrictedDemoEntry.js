@@ -36,5 +36,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const plugins = [...Plugin];
 
-  Mirador.viewer(config, plugins);
+  // Exposed for debugging from the console — the auth state machine is the hard
+  // part to reason about from the UI alone. Useful checks:
+  //   __DEMO_STORE__.getState().auth                            // which service, what status
+  //   __DEMO_STORE__.getState().miradorLoginPluginPopupBlocked   // did a block get recorded
+  window.__DEMO_STORE__ = Mirador.viewer(config, plugins).store;
 });
