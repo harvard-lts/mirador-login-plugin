@@ -1,0 +1,42 @@
+{
+  "@context": "http://iiif.io/api/presentation/3/context.json",
+  "id": "http://localhost:9000/local-restricted.json",
+  "type": "Manifest",
+  "label": { "en": ["Local restricted image (kiosk auth fixture)"] },
+  "items": [
+    {
+      "id": "http://localhost:9000/local-restricted.json/canvas/1",
+      "type": "Canvas",
+      "height": 2340,
+      "width": 1613,
+      "items": [
+        {
+          "id": "http://localhost:9000/local-restricted.json/canvas/1/page",
+          "type": "AnnotationPage",
+          "items": [
+            {
+              "id": "http://localhost:9000/local-restricted.json/canvas/1/page/anno",
+              "type": "Annotation",
+              "motivation": "painting",
+              "target": "http://localhost:9000/local-restricted.json/canvas/1",
+              "body": {
+                "id": "http://localhost:23002/assets/images/drs:400338711/full/max/0/default.jpg",
+                "type": "Image",
+                "format": "image/jpeg",
+                "height": 2340,
+                "width": 1613,
+                "service": [
+                  {
+                    "id": "http://localhost:23002/assets/images/drs:400338711",
+                    "type": "ImageService2",
+                    "profile": "level2"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

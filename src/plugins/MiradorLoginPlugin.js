@@ -4,9 +4,11 @@ import {
   getVisibleCanvases,
   selectInfoResponses,
   getAccessTokens,
+  getAuth,
   requestInfoResponse,
   MiradorCanvas,
 } from 'mirador';
+import { popupBlocked as popupBlockedAction } from '../state/popupBlocked';
 
 // How long to wait after a login signal before deciding core failed to refresh.
 // Core's own path is `takeEvery(RECEIVE_ACCESS_TOKEN, refetchInfoResponses)`,
@@ -94,10 +96,22 @@ export const originOf = (url) => {
  */
 const LoginMonitor = ({
   visibleCanvasesByWindow, infoResponses, authSucceeded, requestInfoResponse,
+  auth = undefined, popupBlocked = undefined,
 }) => {
   // Keep latest props in a ref so timers and event handlers registered once on
   // mount always read current values.
   const propsRef = useRef({ visibleCanvasesByWindow, infoResponses, requestInfoResponse });
+  /**
+   * Assigned during render, NOT in an effect. `window.open` is called from
+   * core's `NewBrowserWindow` mount effect, and BackgroundPluginArea renders
+   * after Workspace — so core's effect runs a full commit before any effect of
+   * ours. An effect-updated ref would still hold the previous auth state at the
+   * moment the popup is blocked, and the lookup below would find nothing.
+   */
+  const authRef = useRef(auth);
+  const popupBlockedRef = useRef(popupBlocked);
+  authRef.current = auth;
+  popupBlockedRef.current = popupBlocked;
   const activePopupRef = useRef(null);
   const lastRepairRef = useRef(0);
   const repairTimerRef = useRef(null);
@@ -199,7 +213,43 @@ const LoginMonitor = ({
     window.open = function trackedOpen(...args) {
       const popup = originalWindowOpen.apply(this, args);
       const url = args[0];
-      if (popup && url) {
+      /**
+       * A blocked popup makes `window.open` return `null`. Core's
+       * `NewBrowserWindow` null-checks that in its poll interval but not in its
+       * unmount cleanup, which calls `newWindow.close()` unconditionally — so
+       * handing back a bare `null` throws inside an effect cleanup and the
+       * window's error boundary replaces everything, image and top bar
+       * included. An already-closed stub takes core's own "popup dismissed"
+       * path instead: the interval sees `closed`, fires `onClose`, and the auth
+       * request resolves rather than hanging at `isFetching` forever.
+       *
+       * Deliberately not tracked in `activePopupRef`: no window ever opened, so
+       * there is no round-trip to wait for and nothing to repair on focus.
+       *
+       * This matters most for the in-library kiosk service, which core opens
+       * with no user gesture behind it — the case browsers block by default.
+       * See LTSMPS-1048.
+       */
+      if (!popup) {
+        /**
+         * Tell the banner which auth request was blocked so Retry can
+         * re-dispatch it. Core builds the popup url as
+         * `${authServiceId}?origin=…`, and the matching auth entry already
+         * exists in state by the time it opens the window, so the entry gives
+         * us the windowId and profile that `addAuthenticationRequest` needs.
+         */
+        const authServiceId = (url || '').split('?')[0];
+        const entry = authServiceId && authRef.current?.[authServiceId];
+        if (entry?.windowId && popupBlockedRef.current) {
+          popupBlockedRef.current({
+            authServiceId,
+            profile: entry.profile,
+            windowId: entry.windowId,
+          });
+        }
+        return { closed: true, close() {}, focus() {} };
+      }
+      if (url) {
         if (url.includes('logout')) {
           activePopupRef.current = { popup, kind: 'logout', origin: originOf(url) };
         } else if (url.includes('login') || url.includes('auth')) {
@@ -279,13 +329,15 @@ export const mapStateToProps = (state) => {
   const accessTokens = getAccessTokens(state) || {};
 
   return {
-    visibleCanvasesByWindow,
-    infoResponses: selectInfoResponses(state),
+    auth: getAuth(state),
     authSucceeded: Object.values(accessTokens).some((token) => token?.success),
+    infoResponses: selectInfoResponses(state),
+    visibleCanvasesByWindow,
   };
 };
 
 export const mapDispatchToProps = {
+  popupBlocked: popupBlockedAction,
   requestInfoResponse,
 };
 
