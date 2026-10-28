@@ -486,6 +486,162 @@ describe('LoginMonitor popup-close trigger', () => {
   });
 });
 
+// After an interactive login core refreshes the info response in place, which
+// leaves the OpenSeadragon tiled image built while logged out (with its failed
+// tiles) on screen. The plugin re-requests those services so Mirador rebuilds it.
+describe('LoginMonitor rebuild after a login popup', () => {
+  let originalOpen;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    MiradorCanvas.mockReset();
+    requestInfoResponse.mockReset();
+    MiradorCanvas.mockImplementation(() => ({ imageServiceIds: ['svc-a'] }));
+    originalOpen = window.open;
+    window.open = vi.fn().mockReturnValue({ closed: false });
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    window.open = originalOpen;
+  });
+
+  const canvases = { w1: [{ id: 'c1' }] };
+  const LOGIN_URL = 'https://mps-dev.example.com/login/mirador?origin=x';
+
+  const monitor = (infoResponses, authSucceeded) => (
+    <LoginMonitor
+      visibleCanvasesByWindow={canvases}
+      infoResponses={infoResponses}
+      authSucceeded={authSucceeded}
+      requestInfoResponse={requestInfoResponse}
+    />
+  );
+
+  /** Logged out with a degraded image, then a popup opens at `url`. */
+  const openPopup = (url = LOGIN_URL) => {
+    const view = render(monitor({ 'svc-a': entry('svc-a', true) }, false));
+    window.open(url, '_blank');
+    return view;
+  };
+
+  // The order observed live: core sets the token's `success` only when its
+  // refetch lands, so the full-access entry and authSucceeded arrive together.
+  it('rebuilds a service core refreshed in place after a login popup', () => {
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+
+    // Nothing else piles on once the grace period has passed.
+    vi.advanceTimersByTime(REPAIR_GRACE_MS * 2);
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds when the token succeeds before core\'s refetch lands', () => {
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': entry('svc-a', true) }, true));
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds after a kiosk popup too', () => {
+    const view = openPopup('https://mps-dev.example.com/login/kiosk?origin=x');
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+  });
+
+  it('does NOT rebuild a service that went through a request', () => {
+    // A REQUEST_INFO_RESPONSE already makes Mirador rebuild the tiled image.
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': { id: 'svc-a', isFetching: true } }, false));
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does NOT rebuild a service core removed', () => {
+    const view = openPopup();
+    view.rerender(monitor({}, false));
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('waits while core\'s refetch comes back degraded again', () => {
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': entry('svc-a', true) }, false));
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT rebuild a service that was not degraded when the popup opened', () => {
+    const view = render(monitor({ 'svc-a': entry('svc-a', false) }, false));
+    window.open(LOGIN_URL, '_blank');
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does NOT treat a logout popup as a login round-trip', () => {
+    const view = openPopup('https://mps-dev.example.com/logout/mirador?origin=x');
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does NOT treat a blocked login popup as a login round-trip', () => {
+    window.open = vi.fn().mockReturnValue(null);
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).not.toHaveBeenCalled();
+  });
+
+  it('does not rebuild twice when the grace-period repair already re-requested it', () => {
+    // Slow token: the popup-close repair re-requests the still-degraded image
+    // first, and its response lands at full access. That request rebuilt the
+    // tiled image, so the rebuild must not fire again.
+    const popup = { closed: false };
+    window.open = vi.fn().mockReturnValue(popup);
+    const view = openPopup();
+    popup.closed = true;
+    window.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS * 2);
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('only rebuilds once per login popup', () => {
+    const view = openPopup();
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+
+    // Later, without another popup: the image degrades again and a silent token
+    // probe refreshes it in place. That is the signed-in page load case.
+    vi.advanceTimersByTime(REFRESH_DEBOUNCE_MS);
+    view.rerender(monitor({ 'svc-a': entry('svc-a', true) }, false));
+    view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
+    vi.advanceTimersByTime(REPAIR_GRACE_MS);
+
+    expect(requestInfoResponse).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('originOf', () => {
   it('reduces a popup url to its bare origin', () => {
     expect(originOf('https://mps-dev.example.com/logout/mirador?a=1')).toBe('https://mps-dev.example.com');
