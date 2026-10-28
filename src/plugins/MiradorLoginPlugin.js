@@ -26,19 +26,19 @@ export const POPUP_CLOSE_DELAY_MS = 100;
 export const LOGOUT_COMPLETE_TYPE = 'mps-logout-complete';
 
 /**
- * Collect the image service id of every visible canvas across every window.
- * A canvas that cannot be wrapped is logged and skipped rather than aborting
+ * Map the image service id of every visible canvas to the first window showing
+ * it. A canvas that cannot be wrapped is logged and skipped rather than aborting
  * the whole sweep.
  */
-export const visibleImageServiceIds = (visibleCanvasesByWindow) => {
-  if (!visibleCanvasesByWindow) return [];
+export const windowIdsByImageService = (visibleCanvasesByWindow) => {
+  const windowIds = new Map();
+  if (!visibleCanvasesByWindow) return windowIds;
 
-  const ids = [];
-  Object.values(visibleCanvasesByWindow).forEach((canvases) => {
+  Object.entries(visibleCanvasesByWindow).forEach(([windowId, canvases]) => {
     (canvases || []).forEach((canvas, index) => {
       try {
         new MiradorCanvas(canvas).imageServiceIds.forEach((serviceId) => {
-          if (serviceId) ids.push(serviceId);
+          if (serviceId && !windowIds.has(serviceId)) windowIds.set(serviceId, windowId);
         });
       } catch (error) {
         console.error(`[LoginMonitor] Error processing canvas ${index + 1}:`, error);
@@ -46,8 +46,13 @@ export const visibleImageServiceIds = (visibleCanvasesByWindow) => {
     });
   });
 
-  return [...new Set(ids)];
+  return windowIds;
 };
+
+/** Collect the image service id of every visible canvas across every window. */
+export const visibleImageServiceIds = (visibleCanvasesByWindow) => [
+  ...windowIdsByImageService(visibleCanvasesByWindow).keys(),
+];
 
 /**
  * The origin a popup url will land on, for checking `event.origin` against.
@@ -134,14 +139,21 @@ const LoginMonitor = ({
    * Dispatch `requestInfoResponse` for the given services. The request resets
    * each entry, so Mirador also rebuilds its tiled image — a service requested
    * here no longer needs the post-login rebuild.
+   *
+   * The window id must go with it. A degraded response restarts core's silent
+   * `external` probe for that window, and core only renders the token iframe
+   * for an auth request whose window matches — without one the token stays
+   * fetching forever and no auth bar shows. That is what happened after logging
+   * out of a page that signed in through the `external` probe on load.
    */
   const dispatchRequests = useCallback((serviceIds) => {
     lastRepairRef.current = Date.now();
     serviceIds.forEach((serviceId) => degradedAtLoginRef.current?.delete(serviceId));
     if (degradedAtLoginRef.current?.size === 0) degradedAtLoginRef.current = null;
 
-    const { requestInfoResponse: dispatchRequest } = propsRef.current;
-    serviceIds.forEach((serviceId) => dispatchRequest(serviceId));
+    const { requestInfoResponse: dispatchRequest, visibleCanvasesByWindow: visible } = propsRef.current;
+    const windowIds = windowIdsByImageService(visible);
+    serviceIds.forEach((serviceId) => dispatchRequest(serviceId, undefined, windowIds.get(serviceId)));
   }, []);
 
   /** Re-request info.json for the given image services, so tiles reload with auth. */
