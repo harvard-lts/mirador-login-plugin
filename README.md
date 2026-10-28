@@ -40,10 +40,11 @@ removed from the viewer builds.
    untouched by core (identity comparison — every info-response action replaces
    the entry, so an unchanged reference proves core ignored it).
 
-On a healthy login every entry has changed by step 4, so this plugin dispatches
-nothing and core's single request stands. It cannot double-refresh by
-construction, and the extra 1.5s applies only to the repair path that previously
-never recovered at all.
+On a healthy silent sign-in (an already-signed-in page load) every entry has
+changed by step 4, so this plugin dispatches nothing and core's single request
+stands, and the extra 1.5s applies only to the repair path that previously never
+recovered at all. An interactive login is the one deliberate exception — see
+[Rebuilding the image after an interactive login](#rebuilding-the-image-after-an-interactive-login-230).
 
 > **2.1.0 is broken — use 2.1.1 or later.** 2.1.0 omitted the `degraded` test in
 > steps 2 and 4 and asked only "did core act?". For a user who is *already*
@@ -81,6 +82,50 @@ So `2.2.0` adds a second, unfiltered path:
 > out `window.opener` in the popup whenever the viewer and login origins differ,
 > which would also break the `popup.closed` fallback. mps-login sets this on the
 > `logout-close` response only.
+
+## Rebuilding the image after an interactive login (2.3.0)
+
+After a popup login, core *does* refresh the info response, yet the image can
+stay blurry while the auth bar already says "Logout" (LTSVIEWER-507, reproduced
+in Chrome with the cache disabled):
+
+1. While logged out, OpenSeadragon requests the full-size tiles. The image
+   delivery service redirects each one to login, the browser rejects the
+   redirect (Chrome blocks it outright with `ERR_BLOCKED_BY_ORB`), and
+   OpenSeadragon 5 marks every failed tile `exists = false` — it never requests
+   that tile again for the life of the tiled image.
+2. After login, core's `refetchInfoResponses` replaces the degraded info response
+   with a full-access one **in place**, without a `REQUEST_INFO_RESPONSE`. Mirador
+   keeps the mounted tiled image, so no tile is re-requested.
+3. Verify-then-repair never even armed. Core sets the access token's `success`
+   only when that same refetch lands, so the access-token trigger fires in the
+   render where the image is already undegraded, and step 2 finds nothing.
+
+So `2.3.0` adds a rebuild path that does not depend on that ordering:
+
+1. When the `window.open` interception sees a **login or kiosk popup**, it
+   records which visible services are degraded at that moment — their tiles were
+   requested while logged out.
+2. As soon as core flips one of them to full access in place (`degraded: false`,
+   not in flight), it is re-requested. `requestInfoResponse` resets the entry,
+   Mirador unmounts and rebuilds the tiled image, and the tiles load with the new
+   cookie.
+3. A recorded service that goes through a request first (core's, or the
+   verify-then-repair path's) or is removed is dropped instead: its tiled image is
+   rebuilt anyway, so nothing is requested twice. Logout clears the record.
+
+This deliberately costs one extra info.json request per degraded image, and only
+after a popup. An already-signed-in page load goes through the same
+degraded-then-refreshed sequence via the silent `external` token probe, but its
+tiles were requested with a valid cookie and loaded fine, so it is left alone —
+the 2.1.0 "reload a good image on every load" regression stays fixed. Each image
+is rebuilt at most once per popup, and a blocked popup does not count.
+
+> This is what lets mps-login send `Cross-Origin-Opener-Policy: unsafe-none` on
+> its `/login` routes. With Helmet's default `same-origin`, Chrome severs the
+> popup, core reads `popup.closed` as true immediately and requests the token
+> before the login finishes; with `unsafe-none` core gets the token, and this
+> rebuild is what makes the image follow.
 
 ## Compatibility
 

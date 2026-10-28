@@ -88,6 +88,12 @@ export const originOf = (url) => {
  * anything core already replaced, the healthy paths issue exactly one request —
  * core's, or none at all — and this plugin issues none.
  *
+ * The one exception is an interactive login (a login or kiosk popup): an image
+ * core refreshed in place still shows the tiled image built while logged out,
+ * whose failed tiles never reload, so it is re-requested once to rebuild it.
+ * See the rebuild effect below. An already-signed-in page load never opens a
+ * popup and keeps its single request.
+ *
  * Logout is the mirror image and needs the opposite treatment. After logout the
  * cached info responses are full-resolution and MUST be re-requested so they come
  * back degraded, so there is nothing to verify first — see `refreshAll`.
@@ -113,6 +119,9 @@ const LoginMonitor = ({
   authRef.current = auth;
   popupBlockedRef.current = popupBlocked;
   const activePopupRef = useRef(null);
+  // Visible services that were degraded when a login (or kiosk) popup opened,
+  // i.e. whose tiles were requested while logged out. See the rebuild effect.
+  const degradedAtLoginRef = useRef(null);
   const lastRepairRef = useRef(0);
   const repairTimerRef = useRef(null);
   const prevAuthSucceededRef = useRef(authSucceeded);
@@ -121,15 +130,25 @@ const LoginMonitor = ({
     propsRef.current = { visibleCanvasesByWindow, infoResponses, requestInfoResponse };
   }, [visibleCanvasesByWindow, infoResponses, requestInfoResponse]);
 
-  /** Re-request info.json for the given image services, so tiles reload with auth. */
-  const repair = useCallback((serviceIds) => {
-    const now = Date.now();
-    if (now - lastRepairRef.current < REFRESH_DEBOUNCE_MS) return;
-    lastRepairRef.current = now;
+  /**
+   * Dispatch `requestInfoResponse` for the given services. The request resets
+   * each entry, so Mirador also rebuilds its tiled image — a service requested
+   * here no longer needs the post-login rebuild.
+   */
+  const dispatchRequests = useCallback((serviceIds) => {
+    lastRepairRef.current = Date.now();
+    serviceIds.forEach((serviceId) => degradedAtLoginRef.current?.delete(serviceId));
+    if (degradedAtLoginRef.current?.size === 0) degradedAtLoginRef.current = null;
 
     const { requestInfoResponse: dispatchRequest } = propsRef.current;
     serviceIds.forEach((serviceId) => dispatchRequest(serviceId));
   }, []);
+
+  /** Re-request info.json for the given image services, so tiles reload with auth. */
+  const repair = useCallback((serviceIds) => {
+    if (Date.now() - lastRepairRef.current < REFRESH_DEBOUNCE_MS) return;
+    dispatchRequests(serviceIds);
+  }, [dispatchRequests]);
 
   /**
    * Arm a deferred check: note which visible services are serving a DEGRADED
@@ -169,6 +188,48 @@ const LoginMonitor = ({
   }, [repair]);
 
   /**
+   * Rebuild an image core refreshed in place after an interactive login.
+   *
+   * Core's `refetchInfoResponses` replaces the degraded info response with a
+   * full-access one without a REQUEST_INFO_RESPONSE, so Mirador keeps the
+   * OpenSeadragon tiled image it built while logged out. Every tile that image
+   * requested was redirected to login (Chrome blocks the redirect outright),
+   * and OpenSeadragon marks a failed tile `exists = false` and never requests it
+   * again — the image stays blurry while the auth bar says "Logout".
+   * Re-requesting the service makes Mirador unmount and rebuild the tiled image,
+   * which then loads its tiles with the new cookie.
+   *
+   * This cannot hang off `armRepair`: core only sets the token's `success` when
+   * that same refetch lands, so the access-token trigger fires in the render
+   * where the image is already undegraded and finds nothing to arm. Instead the
+   * services degraded when the popup opened are recorded, and each is rebuilt
+   * the moment core flips it to full access. A service that goes through a
+   * request (core's or ours) or is removed is dropped: its tiled image is
+   * rebuilt anyway.
+   *
+   * Costs one extra info.json request per degraded image, and only after a
+   * login or kiosk popup. An already-signed-in page load goes through the same
+   * degraded-then-refreshed sequence via the silent token probe, but its tiles
+   * were requested with a valid cookie and loaded fine, so it is left alone.
+   */
+  useEffect(() => {
+    const pending = degradedAtLoginRef.current;
+    if (!pending) return;
+
+    const refreshed = [];
+    [...pending].forEach((id) => {
+      const current = infoResponses?.[id];
+      if (!current || current.isFetching) {
+        pending.delete(id);
+      } else if (current.degraded === false) {
+        refreshed.push(id);
+      }
+    });
+    if (pending.size === 0) degradedAtLoginRef.current = null;
+    if (refreshed.length > 0) dispatchRequests(refreshed);
+  }, [infoResponses, dispatchRequests]);
+
+  /**
    * Re-request EVERY visible image service, with no `degraded` filter — the
    * logout path.
    *
@@ -187,6 +248,7 @@ const LoginMonitor = ({
    */
   const refreshAll = useCallback(() => {
     clearTimeout(repairTimerRef.current);
+    degradedAtLoginRef.current = null;
     const ids = visibleImageServiceIds(propsRef.current.visibleCanvasesByWindow);
     if (ids.length > 0) repair(ids);
   }, [repair]);
@@ -254,6 +316,11 @@ const LoginMonitor = ({
           activePopupRef.current = { popup, kind: 'logout', origin: originOf(url) };
         } else if (url.includes('login') || url.includes('auth')) {
           activePopupRef.current = { popup, kind: 'login', origin: originOf(url) };
+          // These images' tiles were requested while logged out.
+          const { visibleCanvasesByWindow: visible, infoResponses: current } = propsRef.current;
+          const degraded = visibleImageServiceIds(visible)
+            .filter((id) => current?.[id]?.degraded === true);
+          if (degraded.length > 0) degradedAtLoginRef.current = new Set(degraded);
         }
       }
       return popup;
