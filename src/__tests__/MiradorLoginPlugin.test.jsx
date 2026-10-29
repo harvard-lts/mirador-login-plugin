@@ -27,6 +27,7 @@ vi.mock('mirador', () => ({
 const mod = await import('../plugins/MiradorLoginPlugin.js');
 const {
   default: plugin, REPAIR_GRACE_MS, REFRESH_DEBOUNCE_MS, LOGOUT_COMPLETE_TYPE, originOf,
+  windowIdsByImageService,
 } = mod;
 const { component: LoginMonitor, mapStateToProps, mapDispatchToProps } = plugin;
 
@@ -195,7 +196,7 @@ describe('LoginMonitor verify-then-repair', () => {
 
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -256,7 +257,7 @@ describe('LoginMonitor verify-then-repair', () => {
     update(view, { 'svc-a': entry('svc-a', false), 'svc-b': stillStale });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -265,7 +266,7 @@ describe('LoginMonitor verify-then-repair', () => {
     login({ 'svc-ok': entry('svc-ok', false), 'svc-bad': entry('svc-bad', true) });
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-bad');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-bad', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -313,14 +314,15 @@ describe('LoginMonitor verify-then-repair', () => {
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
   });
 
   it('logs and continues when a canvas throws', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    MiradorCanvas
-      .mockImplementationOnce(() => { throw new Error('bad canvas'); })
-      .mockImplementationOnce(() => ({ imageServiceIds: ['svc-ok'] }));
+    MiradorCanvas.mockImplementation((canvas) => {
+      if (canvas.id === 'c1') throw new Error('bad canvas');
+      return { imageServiceIds: ['svc-ok'] };
+    });
 
     const twoCanvases = { w1: [{ id: 'c1' }, { id: 'c2' }] };
     const responses = { 'svc-ok': entry('svc-ok', true) };
@@ -343,7 +345,7 @@ describe('LoginMonitor verify-then-repair', () => {
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
     expect(errorSpy).toHaveBeenCalled();
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-ok');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-ok', undefined, 'w1');
   });
 });
 
@@ -395,7 +397,7 @@ describe('LoginMonitor popup-close trigger', () => {
 
     closeAndFocus(popup);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
   });
 
   it('does not repair after a popup closes if the image is not degraded', () => {
@@ -431,7 +433,7 @@ describe('LoginMonitor popup-close trigger', () => {
 
     closeAndFocus(null);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
   });
 
   it('ignores focus events when no popup is active', () => {
@@ -533,7 +535,7 @@ describe('LoginMonitor rebuild after a login popup', () => {
     const view = openPopup();
     view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
 
     // Nothing else piles on once the grace period has passed.
@@ -548,7 +550,7 @@ describe('LoginMonitor rebuild after a login popup', () => {
 
     view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(1);
   });
 
@@ -556,7 +558,7 @@ describe('LoginMonitor rebuild after a login popup', () => {
     const view = openPopup('https://mps-dev.example.com/login/kiosk?origin=x');
     view.rerender(monitor({ 'svc-a': entry('svc-a', false) }, true));
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
   });
 
   it('does NOT rebuild a service that went through a request', () => {
@@ -642,6 +644,27 @@ describe('LoginMonitor rebuild after a login popup', () => {
   });
 });
 
+describe('windowIdsByImageService', () => {
+  beforeEach(() => {
+    MiradorCanvas.mockReset();
+    MiradorCanvas.mockImplementation((canvas) => ({ imageServiceIds: canvas.services }));
+  });
+
+  it('maps each image service to the first window showing it', () => {
+    const map = windowIdsByImageService({
+      w1: [{ services: ['svc-a'] }],
+      w2: [{ services: ['svc-a', 'svc-b'] }],
+    });
+
+    expect([...map]).toEqual([['svc-a', 'w1'], ['svc-b', 'w2']]);
+  });
+
+  it('returns an empty map without visible canvases', () => {
+    expect(windowIdsByImageService(undefined).size).toBe(0);
+    expect(windowIdsByImageService({ w1: null }).size).toBe(0);
+  });
+});
+
 describe('originOf', () => {
   it('reduces a popup url to its bare origin', () => {
     expect(originOf('https://mps-dev.example.com/logout/mirador?a=1')).toBe('https://mps-dev.example.com');
@@ -705,8 +728,30 @@ describe('LoginMonitor logout refresh', () => {
 
     postLogoutComplete();
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b', undefined, 'w1');
+    expect(requestInfoResponse).toHaveBeenCalledTimes(2);
+  });
+
+  // Core restarts the silent `external` probe from the degraded response, and
+  // only renders its token iframe when the request carries the window id.
+  it('passes each service the window that shows it', () => {
+    MiradorCanvas.mockImplementation((canvas) => ({ imageServiceIds: [`svc-${canvas.id}`] }));
+    window.open = vi.fn().mockReturnValue({ closed: false });
+    render(
+      <LoginMonitor
+        visibleCanvasesByWindow={{ w1: [{ id: 'a' }], w2: [{ id: 'b' }] }}
+        infoResponses={{ 'svc-a': entry('svc-a', false), 'svc-b': entry('svc-b', false) }}
+        authSucceeded
+        requestInfoResponse={requestInfoResponse}
+      />,
+    );
+    window.open(LOGOUT_URL, '_blank');
+
+    postLogoutComplete();
+
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b', undefined, 'w2');
     expect(requestInfoResponse).toHaveBeenCalledTimes(2);
   });
 
@@ -753,8 +798,8 @@ describe('LoginMonitor logout refresh', () => {
     window.dispatchEvent(new Event('focus'));
     vi.advanceTimersByTime(REPAIR_GRACE_MS);
 
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a');
-    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-a', undefined, 'w1');
+    expect(requestInfoResponse).toHaveBeenCalledWith('svc-b', undefined, 'w1');
     expect(requestInfoResponse).toHaveBeenCalledTimes(2);
   });
 

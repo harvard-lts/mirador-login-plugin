@@ -77,6 +77,14 @@ So `2.2.0` adds a second, unfiltered path:
    `postMessage` — the focus handler refreshes anyway. The shared
    `REFRESH_DEBOUNCE_MS` guard keeps that from doubling up.
 
+Every re-request passes the image's **window id** (`2.3.1`). The degraded
+response restarts core's silent `external` probe, and core only renders that
+probe's token iframe for an auth request tied to a window. Without it — and core's
+own logout refetch sends none — the token stays fetching forever and *no* auth
+bar shows. This bites whenever the page signed in through the `external` probe,
+i.e. after any reload while logged in: logout resets `external`, the probe never
+fails, and the interactive `login` service never takes over the bar.
+
 > The `postMessage` handshake requires the logout response to carry
 > `Cross-Origin-Opener-Policy: unsafe-none`. Helmet's default `same-origin` nulls
 > out `window.opener` in the popup whenever the viewer and login origins differ,
